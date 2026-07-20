@@ -16,11 +16,11 @@ An interactive ASCII water simulator for your terminal, written in C++17 with ze
 
 ## Features
 
-- **Click to splash** — real mouse support in the terminal (SGR mouse reporting); drag to carve streams
-- **Drivable boats** — WASD to steer; moving boats leave a rippling wake, and because the wave source moves, the rings compress ahead and stretch behind (a visible Doppler pattern)
-- **Boats ride the waves** — splash next to a parked boat and it gets shoved away
-- **Multiple boats** — spawn as many as you like and switch between them
-- **Rain mode** — random droplets across the whole pond
+- **Click to splash**: real mouse support in the terminal (SGR mouse reporting), can drag to carve streams
+- **Drivable boats**: WASD to steer, moving boats leave a rippling wake, and because the wave source moves, the rings compress ahead and stretch behind (a visible Doppler effect)
+- **Boats ride the waves**: splash next to a parked boat and it gets pushed away
+- **Multiple boats**: spawn as many as you want and switch between them
+- **Rain mode**: random droplets across the whole pond
 - 256-color height-mapped rendering, ~30 FPS, single flicker-free write per frame
 
 ## Build & run
