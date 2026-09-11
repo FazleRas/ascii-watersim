@@ -179,7 +179,9 @@ void render(const Water& water, const std::vector<Boat>& boats,
             }
             frame += cell.ch;
         }
-        frame += "\x1b[0m\r\n";
+        frame += "\x1b[0m";
+        // no newline after the bottom row: it would scroll the HUD off-screen
+        if (r < water.height() - 1) frame += "\r\n";
         lastColor = -1;
     }
     write(STDOUT_FILENO, frame.data(), frame.size());
@@ -211,8 +213,8 @@ int main(int argc, char** argv) {
         cols = ws.ws_col;
         rows = ws.ws_row;
     }
-    int W = std::clamp((int)cols, 20, 160);
-    int H = std::clamp((int)rows - 1, 10, 48);  // one row reserved for the HUD
+    int W = std::max(cols, 20);
+    int H = std::max(rows - 1, 10);  // one row reserved for the HUD
 
     Terminal term;
     if (!term.ok()) {
