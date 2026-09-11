@@ -2,6 +2,10 @@
 
 An interactive ASCII water simulator for your terminal, written in C++17 with zero dependencies. Click to splash, drive boats around, watch the wakes ripple.
 
+**[Play it in the browser](https://fazleras.github.io/ascii-watersim/)** — the same
+physics ported to a single HTML file ([`docs/index.html`](docs/index.html)),
+with touch support and a double-slit preset.
+
 ```
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ~..--~~.~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~..~~
@@ -22,6 +26,7 @@ An interactive ASCII water simulator for your terminal, written in C++17 with ze
 - **Multiple boats**: spawn as many as you want and switch between them
 - **Rain mode**: random droplets across the whole pond
 - **Land mode**: paint islands with the mouse; waves reflect off the shore and boats bounce off it
+- **Double slit** (browser build): a wall with two openings and a plane-wave source on the left — the interference pattern is real, it falls out of the same five-line update
 - 256-color height-mapped rendering, ~30 FPS, single flicker-free write per frame
 
 ## Build & run
@@ -46,6 +51,9 @@ g++ -std=c++17 -O2 main.cpp -o watersim
 | `SPACE`     | toggle rain                     |
 | `L`         | toggle land mode: click/drag builds 3×3 land, right-click erases |
 | `q`         | quit                            |
+
+The browser build adds `X` (double slit) and `C` (clear land), plus on-screen
+buttons and a d-pad on touch devices.
 
 ## How it works
 

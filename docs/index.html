@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>watersim</title>
+<meta name="description" content="Interactive ASCII water simulator: click to splash, drive boats, build land, run the double-slit experiment.">
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #000; color: #eee; overflow: hidden;
+    font: 13px/1 ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+    -webkit-user-select: none; user-select: none;
+  }
+  #hud {
+    position: fixed; top: 0; left: 0; right: 0; height: 30px;
+    display: flex; align-items: center; gap: 6px; padding: 0 8px;
+    background: #000; white-space: nowrap; overflow-x: auto; scrollbar-width: none;
+    color: #fff;
+  }
+  #hud::-webkit-scrollbar { display: none; }
+  #hud button {
+    font: inherit; color: #ddd; background: transparent; border: 1px solid #444;
+    padding: 4px 8px; cursor: pointer; line-height: 1;
+  }
+  #hud button:hover { border-color: #aaa; }
+  #hud button.on { border-color: #ff0; color: #ff0; }
+  #hud .sep { color: #555; }
+  #hud .key { color: #888; }
+  /* Touch d-pad: fixed over the pond so it is reachable without scrolling
+     the HUD. Hidden on mouse/trackpad devices, where WASD does the job. */
+  #pad {
+    position: fixed; right: 10px; bottom: 28px; display: none;
+    grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(2, 44px); gap: 4px;
+  }
+  #pad button {
+    font: inherit; font-size: 16px; color: #ddd; border: 1px solid #555;
+    background: rgba(0, 0, 0, 0.6); cursor: pointer;
+  }
+  #pad [data-k="w"] { grid-column: 2; }
+  #pad [data-k="a"] { grid-column: 1; grid-row: 2; }
+  #pad [data-k="s"] { grid-column: 2; grid-row: 2; }
+  #pad [data-k="d"] { grid-column: 3; grid-row: 2; }
+  @media (pointer: coarse) { #pad { display: grid; } }
+  canvas { position: fixed; top: 30px; left: 0; display: block; touch-action: none; }
+  #src { position: fixed; right: 8px; bottom: 8px; color: #555; font-size: 11px; }
+  #src a { color: #888; text-decoration: none; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <span class="key">click:</span><span id="clickHint">splash</span>
+  <span class="sep">·</span>
+  <button id="landBtn" title="L">land</button>
+  <button id="boatBtn" title="B">+boat</button>
+  <button id="switchBtn" title="TAB">switch</button>
+  <button id="rainBtn" title="SPACE">rain</button>
+  <button id="slitBtn" title="X">double slit</button>
+  <button id="clearBtn" title="C">clear</button>
+  <span class="sep">·</span>
+  <span class="key">WASD drive</span>
+</div>
+<canvas id="c"></canvas>
+<div id="pad">
+  <button data-k="w">▲</button><button data-k="a">◀</button><button data-k="s">▼</button><button data-k="d">▶</button>
+</div>
+<div id="src"><a href="https://github.com/FazleRas/ascii-watersim">source</a></div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Physics: a straight port of main.cpp. Height field over two buffers; each
+// cell becomes (sum of 4 neighbours)/2 - previous, then damped. The
+// "- previous" term gives waves momentum so ripples travel outward instead
+// of diffusing in place.
+// ---------------------------------------------------------------------------
+const DAMPING = 0.985;
+const TICK_MS = 33;             // ~30 Hz, same as the terminal loop
+
+class Water {
+  constructor(w, h) {
+    this.w = w; this.h = h;
+    this.cur = new Float64Array(w * h);
+    this.prev = new Float64Array(w * h);
+    this.land = new Uint8Array(w * h);
+  }
+  inBounds(r, c) { return r >= 0 && r < this.h && c >= 0 && c < this.w; }
+  at(r, c) { return this.inBounds(r, c) ? this.cur[r * this.w + c] : 0; }
+  // Out-of-bounds counts as land so the grid edge never reads as shoreline.
+  isLand(r, c) { return !this.inBounds(r, c) || this.land[r * this.w + c] === 1; }
+
+  // 3x3 block centred on (r, c). Placing land displaces water outward (a
+  // ring splash around the block); erasing leaves a dip that fills in.
+  setLand(r, c, on) {
+    let changed = false;
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      const nr = r + dr, nc = c + dc;
+      if (!this.inBounds(nr, nc)) continue;
+      const i = nr * this.w + nc;
+      if ((this.land[i] === 1) === on) continue;
+      this.land[i] = on ? 1 : 0;
+      this.cur[i] = this.prev[i] = on ? 0 : -1.5;
+      changed = true;
+    }
+    if (!changed || !on) return;
+    for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) {
+      if (Math.abs(dr) !== 2 && Math.abs(dc) !== 2) continue;
+      const nr = r + dr, nc = c + dc;
+      if (this.inBounds(nr, nc) && !this.land[nr * this.w + nc]) this.cur[nr * this.w + nc] += 2;
+    }
+  }
+
+  // Sharp peak with softer shoulders so rings start round-ish.
+  splash(r, c, power) {
+    if (this.isLand(r, c)) return;
+    this.cur[r * this.w + c] += power;
+    const dr = [-1, 1, 0, 0], dc = [0, 0, -1, 1];
+    for (let k = 0; k < 4; k++) {
+      const nr = r + dr[k], nc = c + dc[k];
+      if (!this.isLand(nr, nc)) this.cur[nr * this.w + nc] += power * 0.4;
+    }
+  }
+
+  // Land cells are never updated and stay at 0. A land neighbour is read as
+  // the cell's own height, so waves reflect off it same-sign like a wall
+  // (the grid edge, fixed at 0, reflects inverted).
+  step(damping) {
+    const { w, h, cur, prev, land } = this;
+    for (let r = 1; r < h - 1; r++) {
+      for (let c = 1; c < w - 1; c++) {
+        const i = r * w + c;
+        if (land[i]) continue;
+        const self = cur[i];
+        const l = land[i - 1] ? self : cur[i - 1];
+        const rt = land[i + 1] ? self : cur[i + 1];
+        const u = land[i - w] ? self : cur[i - w];
+        const d = land[i + w] ? self : cur[i + w];
+        prev[i] = ((l + rt + u + d) / 2 - prev[i]) * damping;
+      }
+    }
+    this.cur = prev; this.prev = cur;
+  }
+
+  clearLand() {
+    for (let i = 0; i < this.land.length; i++) {
+      if (this.land[i]) { this.land[i] = 0; this.cur[i] = this.prev[i] = 0; }
+    }
+  }
+}
+
+class Boat {
+  constructor(r, c) { this.r = r; this.c = c; this.vr = 0; this.vc = 0; this.wakeTimer = 0; }
+  speed() { return Math.hypot(this.vr, this.vc); }
+  glyph() {
+    if (this.speed() < 0.05) return 'B';
+    if (Math.abs(this.vc) >= Math.abs(this.vr)) return this.vc > 0 ? '>' : '<';
+    return this.vr > 0 ? 'v' : '^';
+  }
+  update(water) {
+    // ride the waves: slide down the local height gradient
+    const ir = this.r | 0, ic = this.c | 0;
+    const gr = water.at(ir + 1, ic) - water.at(ir - 1, ic);
+    const gc = water.at(ir, ic + 1) - water.at(ir, ic - 1);
+    this.vr -= gr * 0.012;
+    this.vc -= gc * 0.012;
+    this.vr *= 0.90;
+    this.vc *= 0.90;
+    const nr = Math.min(Math.max(this.r + this.vr, 1), water.h - 2);
+    const nc = Math.min(Math.max(this.c + this.vc, 1), water.w - 2);
+    if (water.isLand(nr | 0, nc | 0) && !water.isLand(ir, ic)) {
+      this.vr = -this.vr * 0.5;   // bounce off the shore
+      this.vc = -this.vc * 0.5;
+    } else {
+      this.r = nr; this.c = nc;
+    }
+    // moving boats periodically disturb the water -> trailing wake
+    if (this.speed() > 0.12 && ++this.wakeTimer >= 2) {
+      this.wakeTimer = 0;
+      water.splash(this.r | 0, this.c | 0, this.speed() * 5);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering. Same glyph ramp and xterm-256 colours as the terminal build,
+// drawn from a glyph atlas so a full-screen grid stays cheap.
+// ---------------------------------------------------------------------------
+const X256 = {
+  15: '#ffffff', 51: '#00ffff', 45: '#00d7ff', 39: '#00afff', 33: '#0087ff',
+  27: '#005fff', 19: '#0000af', 179: '#d7af5f', 28: '#008700', 226: '#ffff00', 255: '#eeeeee',
+};
+function heightToCell(h) {
+  if (h > 3.0) return ['@', 15];
+  if (h > 1.5) return ['^', 51];
+  if (h > 0.6) return ['=', 45];
+  if (h > 0.2) return ['-', 39];
+  if (h > -0.2) return ['~', 33];
+  if (h > -1.5) return ['.', 27];
+  return [' ', 19];
+}
+// Shoreline (land touching water) renders as sand, interior as green.
+function landCell(water, r, c) {
+  const shore = !water.isLand(r - 1, c) || !water.isLand(r + 1, c) ||
+                !water.isLand(r, c - 1) || !water.isLand(r, c + 1);
+  return shore ? [':', 179] : ['#', 28];
+}
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+let dpr = 1, cellW = 9, cellH = 16, W = 80, H = 24;
+const atlas = new Map();
+
+function glyphSprite(ch, color) {
+  const key = ch + color;
+  let s = atlas.get(key);
+  if (s) return s;
+  s = document.createElement('canvas');
+  s.width = Math.ceil(cellW * dpr); s.height = Math.ceil(cellH * dpr);
+  const g = s.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0, 0, s.width, s.height);
+  g.fillStyle = X256[color];
+  g.font = `${Math.round(cellH * 0.85 * dpr)}px ui-monospace, Menlo, Consolas, "Liberation Mono", monospace`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(ch, s.width / 2, s.height / 2 + dpr);
+  atlas.set(key, s);
+  return s;
+}
+
+// Grid is sized to the viewport at terminal-ish cell proportions; on very
+// large screens cells grow instead of the grid, to keep the step loop cheap.
+let water, boats, activeBoat;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const vw = window.innerWidth, vh = window.innerHeight - 30;
+  cellW = Math.max(9, Math.ceil(vw / 240));
+  cellH = Math.round(cellW * 16 / 9);
+  W = Math.max(20, Math.floor(vw / cellW));
+  H = Math.max(10, Math.floor(vh / cellH));
+  canvas.style.width = `${W * cellW}px`; canvas.style.height = `${H * cellH}px`;
+  canvas.width = Math.ceil(W * cellW * dpr); canvas.height = Math.ceil(H * cellH * dpr);
+  atlas.clear();
+
+  const old = water;
+  water = new Water(W, H);
+  if (old) {                     // keep what fits of the previous pond
+    for (let r = 0; r < Math.min(old.h, H); r++) for (let c = 0; c < Math.min(old.w, W); c++) {
+      water.cur[r * W + c] = old.cur[r * old.w + c];
+      water.prev[r * W + c] = old.prev[r * old.w + c];
+      water.land[r * W + c] = old.land[r * old.w + c];
+    }
+    for (const b of boats) {   // boats keep their relative position
+      b.r = Math.min(Math.max(b.r * H / old.h, 1), H - 2);
+      b.c = Math.min(Math.max(b.c * W / old.w, 1), W - 2);
+    }
+  } else {
+    boats = [new Boat(H / 2, W / 2)];
+    activeBoat = 0;
+  }
+}
+
+function render() {
+  const overlay = new Int16Array(W * H).fill(-1);
+  boats.forEach((b, i) => { overlay[(b.r | 0) * W + (b.c | 0)] = i; });
+  const sw = Math.ceil(cellW * dpr), sh = Math.ceil(cellH * dpr);
+  for (let r = 0; r < H; r++) {
+    for (let c = 0; c < W; c++) {
+      const bi = overlay[r * W + c];
+      const cell = bi >= 0 ? [boats[bi].glyph(), bi === activeBoat ? 226 : 255]
+                 : water.isLand(r, c) ? landCell(water, r, c)
+                 : heightToCell(water.at(r, c));
+      ctx.drawImage(glyphSprite(cell[0], cell[1]), c * sw, r * sh);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Modes and presets
+// ---------------------------------------------------------------------------
+let raining = false, landMode = false, slitMode = false, slitTick = 0;
+
+// A wall at ~45% width with two 3-cell openings, and a plane-wave source
+// pulsing along the left edge. Past the wall the two wavelets overlap and an
+// interference pattern of bright and dark bands appears.
+function buildDoubleSlit() {
+  water.clearLand();
+  const wallC = Math.floor(W * 0.45), cy = Math.floor(H / 2);
+  const gapOffset = Math.max(4, Math.floor(H / 8));
+  for (let r = 0; r < H; r++) {
+    if (Math.abs(r - (cy - gapOffset)) <= 2 || Math.abs(r - (cy + gapOffset)) <= 2) continue;
+    water.setLand(r, wallC, true);
+  }
+  // settle the placement splash so the pattern starts clean
+  for (let i = 0; i < W * H; i++) if (!water.land[i]) water.cur[i] = water.prev[i] = 0;
+}
+function pulseSource() {
+  if (++slitTick % 9) return;
+  for (let r = 1; r < H - 1; r++) if (!water.land[r * W + 2]) water.cur[r * W + 2] += 2.2;
+}
+
+function spawnBoat() {
+  let br = 1 + Math.floor(Math.random() * (H - 2)), bc = 1 + Math.floor(Math.random() * (W - 2));
+  for (let t = 0; t < 32 && water.isLand(br, bc); t++) {
+    br = 1 + Math.floor(Math.random() * (H - 2)); bc = 1 + Math.floor(Math.random() * (W - 2));
+  }
+  boats.push(new Boat(br, bc));
+  activeBoat = boats.length - 1;
+  water.splash(br, bc, 6);
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+const hud = {
+  land: document.getElementById('landBtn'), rain: document.getElementById('rainBtn'),
+  slit: document.getElementById('slitBtn'), hint: document.getElementById('clickHint'),
+};
+function syncHud() {
+  hud.land.classList.toggle('on', landMode);
+  hud.rain.classList.toggle('on', raining);
+  hud.slit.classList.toggle('on', slitMode);
+  hud.hint.textContent = landMode ? 'build · right-click: erase' : 'splash';
+}
+
+function key(k) {
+  const b = boats[activeBoat];
+  switch (k) {
+    case 'w': b.vr -= 0.30; break;
+    case 's': b.vr += 0.30; break;
+    case 'a': b.vc -= 0.45; break;   // cells are taller than wide:
+    case 'd': b.vc += 0.45; break;   // boost horizontal thrust
+    case ' ': raining = !raining; break;
+    case 'l': landMode = !landMode; break;
+    case 'b': spawnBoat(); break;
+    case 'tab': activeBoat = (activeBoat + 1) % boats.length; break;
+    case 'x': slitMode = !slitMode; if (slitMode) buildDoubleSlit(); break;
+    case 'c': water.clearLand(); slitMode = false; break;
+    default: return false;
+  }
+  syncHud();
+  return true;
+}
+window.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key === 'Tab' ? 'tab' : e.key.toLowerCase();
+  if (key(k)) e.preventDefault();
+});
+
+document.getElementById('landBtn').onclick = () => key('l');
+document.getElementById('boatBtn').onclick = () => key('b');
+document.getElementById('switchBtn').onclick = () => key('tab');
+document.getElementById('rainBtn').onclick = () => key(' ');
+document.getElementById('slitBtn').onclick = () => key('x');
+document.getElementById('clearBtn').onclick = () => key('c');
+document.querySelectorAll('#pad button').forEach((btn) => {
+  btn.addEventListener('pointerdown', (e) => { e.preventDefault(); key(btn.dataset.k); });
+});
+
+function cellFromEvent(e) {
+  const rect = canvas.getBoundingClientRect();
+  return [Math.floor((e.clientY - rect.top) / cellH), Math.floor((e.clientX - rect.left) / cellW)];
+}
+function paint(e) {
+  const [r, c] = cellFromEvent(e);
+  if (!water.inBounds(r, c)) return;
+  const right = (e.buttons & 2) !== 0;
+  if (landMode) water.setLand(r, c, !right);
+  else water.splash(r, c, 7);
+}
+canvas.addEventListener('pointerdown', (e) => { canvas.setPointerCapture(e.pointerId); paint(e); });
+canvas.addEventListener('pointermove', (e) => { if (e.buttons) paint(e); });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+window.addEventListener('resize', resize);
+
+// ---------------------------------------------------------------------------
+// Loop: fixed 30 Hz physics, one render per step
+// ---------------------------------------------------------------------------
+resize();
+syncHud();
+water.splash(H >> 1, W >> 1, 8);
+let last = performance.now(), acc = 0;
+function frame(now) {
+  acc += Math.min(now - last, 250); last = now;
+  let stepped = false;
+  while (acc >= TICK_MS) {
+    acc -= TICK_MS;
+    if (raining && Math.random() < 0.25) {
+      water.splash(1 + Math.floor(Math.random() * (H - 2)), 1 + Math.floor(Math.random() * (W - 2)), 2.5);
+    }
+    if (slitMode) pulseSource();
+    for (const b of boats) b.update(water);
+    water.step(DAMPING);
+    stepped = true;
+  }
+  if (stepped) render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
