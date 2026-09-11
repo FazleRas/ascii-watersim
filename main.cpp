@@ -1,6 +1,7 @@
 // watersim -- interactive ASCII water simulator
 //
 //   click     splash (drag to carve streams)
+//   L         toggle land mode: click/drag builds 3x3 land, right-click erases
 //   WASD      drive the active boat
 //   b / TAB   spawn boat / switch boats
 //   SPACE     toggle rain
@@ -61,7 +62,8 @@ public:
     Water(int width, int height)
         : w_(width), h_(height),
           cur_(width * height, 0.0),
-          prev_(width * height, 0.0) {}
+          prev_(width * height, 0.0),
+          land_(width * height, 0) {}
 
     int width()  const { return w_; }
     int height() const { return h_; }
@@ -74,24 +76,59 @@ public:
         return inBounds(r, c) ? cur_[r * w_ + c] : 0.0;
     }
 
+    // Out-of-bounds counts as land so the grid edge never reads as shoreline.
+    bool isLand(int r, int c) const {
+        return !inBounds(r, c) || land_[r * w_ + c];
+    }
+
+    // 3x3 block centred on (r, c). Placing land displaces water outward
+    // (a ring splash around the block); erasing leaves a dip that fills in.
+    void setLand(int r, int c, bool on) {
+        bool changed = false;
+        for (int dr = -1; dr <= 1; dr++)
+            for (int dc = -1; dc <= 1; dc++) {
+                int nr = r + dr, nc = c + dc;
+                if (!inBounds(nr, nc)) continue;
+                int i = nr * w_ + nc;
+                if (land_[i] == on) continue;
+                land_[i] = on;
+                cur_[i] = prev_[i] = on ? 0.0 : -1.5;
+                changed = true;
+            }
+        if (!changed || !on) return;
+        for (int dr = -2; dr <= 2; dr++)
+            for (int dc = -2; dc <= 2; dc++) {
+                if (std::abs(dr) != 2 && std::abs(dc) != 2) continue;
+                int nr = r + dr, nc = c + dc;
+                if (inBounds(nr, nc) && !land_[nr * w_ + nc])
+                    cur_[nr * w_ + nc] += 2.0;
+            }
+    }
+
     // Sharp peak with softer shoulders so rings start round-ish.
     void splash(int r, int c, double power) {
-        if (!inBounds(r, c)) return;
+        if (isLand(r, c)) return;
         cur_[r * w_ + c] += power;
         const int dr[] = {-1, 1, 0, 0};
         const int dc[] = {0, 0, -1, 1};
         for (int k = 0; k < 4; k++) {
             int nr = r + dr[k], nc = c + dc[k];
-            if (inBounds(nr, nc)) cur_[nr * w_ + nc] += power * 0.4;
+            if (!isLand(nr, nc)) cur_[nr * w_ + nc] += power * 0.4;
         }
     }
 
+    // Land cells are never updated and stay at 0. A land neighbour is read as
+    // the cell's own height, so waves reflect off it same-sign like a wall
+    // (the grid edge, fixed at 0, reflects inverted).
     void step(double damping) {
         for (int r = 1; r < h_ - 1; r++) {
             for (int c = 1; c < w_ - 1; c++) {
                 int i = r * w_ + c;
-                double next = (cur_[i - 1] + cur_[i + 1] +
-                               cur_[i - w_] + cur_[i + w_]) / 2.0
+                if (land_[i]) continue;
+                double self = cur_[i];
+                auto nb = [&](int j) { return land_[j] ? self : cur_[j]; };
+                double next = (nb(i - 1) + nb(i + 1) +
+                               nb(i - w_) + nb(i + w_)) / 2.0
                               - prev_[i];
                 prev_[i] = next * damping;
             }
@@ -102,6 +139,7 @@ public:
 private:
     int w_, h_;
     std::vector<double> cur_, prev_;
+    std::vector<unsigned char> land_;
 };
 
 struct Boat {
@@ -126,8 +164,15 @@ struct Boat {
 
         vr *= 0.90;
         vc *= 0.90;
-        r = std::clamp(r + vr, 1.0, (double)water.height() - 2);
-        c = std::clamp(c + vc, 1.0, (double)water.width() - 2);
+        double nr = std::clamp(r + vr, 1.0, (double)water.height() - 2);
+        double nc = std::clamp(c + vc, 1.0, (double)water.width() - 2);
+        if (water.isLand((int)nr, (int)nc) && !water.isLand(ir, ic)) {
+            vr = -vr * 0.5;  // bounce off the shore
+            vc = -vc * 0.5;
+        } else {
+            r = nr;
+            c = nc;
+        }
 
         // moving boats periodically disturb the water -> trailing wake
         if (speed() > 0.12 && ++wakeTimer >= 2) {
@@ -150,13 +195,24 @@ Cell heightToCell(double h) {
 }
 
 // Build the whole frame into one string and write it in a single syscall.
+// Shoreline (land touching water) renders as sand, interior as green.
+Cell landCell(const Water& water, int r, int c) {
+    bool shore = !water.isLand(r - 1, c) || !water.isLand(r + 1, c) ||
+                 !water.isLand(r, c - 1) || !water.isLand(r, c + 1);
+    return shore ? Cell{':', 179} : Cell{'#', 28};
+}
+
 void render(const Water& water, const std::vector<Boat>& boats,
-            size_t activeBoat, bool raining, std::string& frame) {
+            size_t activeBoat, bool raining, bool landMode,
+            std::string& frame) {
     frame.clear();
     frame += "\x1b[H";
 
-    frame += "\x1b[0;97m click:splash  WASD:drive  b:new boat  TAB:switch  "
-             "SPACE:rain";
+    frame += "\x1b[0;97m click:";
+    frame += landMode ? "build  rclick:erase" : "splash";
+    frame += "  L:land";
+    frame += landMode ? "[ON] " : "[off]";
+    frame += "  WASD:drive  b:boat  TAB:switch  SPACE:rain";
     frame += raining ? "[ON] " : "[off]";
     frame += "  q:quit\x1b[K\r\n";
 
@@ -171,7 +227,8 @@ void render(const Water& water, const std::vector<Boat>& boats,
             Cell cell = (boatIdx >= 0)
                 ? Cell{boats[boatIdx].glyph(),
                        boatIdx == (int)activeBoat ? 226 : 255}
-                : heightToCell(water.at(r, c));
+                : water.isLand(r, c) ? landCell(water, r, c)
+                                     : heightToCell(water.at(r, c));
 
             if (cell.color != lastColor) {
                 frame += "\x1b[38;5;" + std::to_string(cell.color) + "m";
@@ -179,7 +236,9 @@ void render(const Water& water, const std::vector<Boat>& boats,
             }
             frame += cell.ch;
         }
-        frame += "\x1b[0m\r\n";
+        frame += "\x1b[0m";
+        // no newline after the bottom row: it would scroll the HUD off-screen
+        if (r < water.height() - 1) frame += "\r\n";
         lastColor = -1;
     }
     write(STDOUT_FILENO, frame.data(), frame.size());
@@ -211,8 +270,8 @@ int main(int argc, char** argv) {
         cols = ws.ws_col;
         rows = ws.ws_row;
     }
-    int W = std::clamp((int)cols, 20, 160);
-    int H = std::clamp((int)rows - 1, 10, 48);  // one row reserved for the HUD
+    int W = std::max(cols, 20);
+    int H = std::max(rows - 1, 10);  // one row reserved for the HUD
 
     Terminal term;
     if (!term.ok()) {
@@ -227,6 +286,7 @@ int main(int argc, char** argv) {
     std::vector<int> wakeTimers{0};
 
     bool raining = false;
+    bool landMode = false;
     std::mt19937 rng{std::random_device{}()};
     std::uniform_int_distribution<int> randRow(1, H - 2), randCol(1, W - 2);
 
@@ -247,13 +307,18 @@ int main(int argc, char** argv) {
                 case 'a': b.vc -= 0.45; break;  // cells are taller than wide:
                 case 'd': b.vc += 0.45; break;  // boost horizontal thrust
                 case ' ': raining = !raining; break;
+                case 'l': case 'L': landMode = !landMode; break;
                 case '\t': activeBoat = (activeBoat + 1) % boats.size(); break;
-                case 'b': case 'B':
-                    boats.push_back({(double)randRow(rng), (double)randCol(rng)});
+                case 'b': case 'B': {
+                    int br = randRow(rng), bc = randCol(rng);
+                    for (int t = 0; t < 32 && water.isLand(br, bc); t++)
+                        br = randRow(rng), bc = randCol(rng);
+                    boats.push_back({(double)br, (double)bc});
                     wakeTimers.push_back(0);
                     activeBoat = boats.size() - 1;
                     water.splash((int)boats.back().r, (int)boats.back().c, 6.0);
                     break;
+                }
                 case '\x1b':  // SGR mouse event: ESC [ < btn ; x ; y M
                     if (i + 2 < n && buf[i + 1] == '[' && buf[i + 2] == '<') {
                         ssize_t j = i + 3;
@@ -265,8 +330,12 @@ int main(int argc, char** argv) {
                             if (buf[j] == 'M' &&
                                 sscanf(params.c_str(), "%d;%d;%d",
                                        &btn, &x, &y) == 3) {
-                                // 1-based terminal coords; row 1 is the HUD
-                                water.splash(y - 2, x - 1, 7.0);
+                                // 1-based terminal coords; row 1 is the HUD.
+                                // btn & 3: 0 = left, 2 = right (+32 while dragging)
+                                if (landMode)
+                                    water.setLand(y - 2, x - 1, (btn & 3) != 2);
+                                else
+                                    water.splash(y - 2, x - 1, 7.0);
                             }
                             i = j;
                         }
@@ -283,7 +352,7 @@ int main(int argc, char** argv) {
 
         water.step(0.985);
 
-        render(water, boats, activeBoat, raining, frame);
+        render(water, boats, activeBoat, raining, landMode, frame);
         std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
     return 0;
