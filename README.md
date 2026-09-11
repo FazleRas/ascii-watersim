@@ -21,6 +21,7 @@ An interactive ASCII water simulator for your terminal, written in C++17 with ze
 - **Boats ride the waves**: splash next to a parked boat and it gets pushed away
 - **Multiple boats**: spawn as many as you want and switch between them
 - **Rain mode**: random droplets across the whole pond
+- **Land mode**: paint islands with the mouse; waves reflect off the shore and boats bounce off it
 - 256-color height-mapped rendering, ~30 FPS, single flicker-free write per frame
 
 ## Build & run
@@ -43,6 +44,7 @@ g++ -std=c++17 -O2 main.cpp -o watersim
 | `b`         | spawn a new boat                |
 | `TAB`       | switch active boat              |
 | `SPACE`     | toggle rain                     |
+| `L`         | toggle land mode: click/drag builds 3×3 land, right-click erases |
 | `q`         | quit                            |
 
 ## How it works
